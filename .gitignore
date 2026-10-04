@@ -198,3 +198,7 @@ cython_debug/
 
 # Local browser automation state
 .playwright-cli/
+
+# Third-party scheme catalogue (downloaded locally, not redistributed)
+examples/matmul_3x3/schemes/
+examples/matmul_3x3/*.tgz
