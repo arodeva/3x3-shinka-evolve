@@ -168,3 +168,15 @@ def test_rank_profile_separates_known_rank23_schemes_and_is_invariant():
         W[:, r] *= c
     assert sym.rank_profile(U, V, W) == sym.rank_profile(*S_lad)
     assert not sym.provably_inequivalent((U, V, W), S_lad)
+
+
+def test_discovered_scheme_is_exact_rank23_and_not_in_known_set():
+    """Discovered schemes must verify exactly and must not be loaded as known
+    schemes (known_schemes/ is the literature reference set)."""
+    ev = _load("evaluate")
+    d = np.load(EX / "discovered_schemes" / "gen6_seed1001_rank23.npz")
+    U, V, W = d["U"], d["V"], d["W"]
+    assert U.shape == V.shape == W.shape == (9, 23)
+    assert ev.is_exact_discrete(U, V, W)
+    assert ev.matches_known_scheme(U, V, W) is None
+    assert not any("discovered" in name for name in ev._KNOWN_SIGNATURES)
