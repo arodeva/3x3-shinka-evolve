@@ -22,12 +22,17 @@ THINKING_TOKENS = {
     "max": 16384,
 }
 
+# Per-model opt-outs for providers where only some models dropped
+# `temperature` support (e.g. specific DeepSeek/Gemini reasoning models).
+# Anthropic/Bedrock are handled separately below: the current Messages API
+# does not accept `temperature` at all, for any model (confirmed against the
+# installed `anthropic` SDK, which has no `temperature` parameter anywhere
+# in its Messages.create signature or types -- sampling is controlled solely
+# through `thinking`/`effort` now), so that exclusion isn't a per-model list.
 NO_TEMPERATURE_MODELS = {
-    "claude-opus-4-8",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
     *GEMINI_THINKING_LEVEL_MODELS,
-    "us.anthropic.claude-opus-4-8",
 }
 
 
@@ -125,8 +130,12 @@ def sample_model_kwargs(
         r_effort = "low"
 
     # 3. SAMPLE: temperature with possible reasoning restrictions
-    include_temperature = api_model_name not in NO_TEMPERATURE_MODELS and not (
-        provider in ("openai", "azure_openai") and is_reasoning_model(model_name)
+    include_temperature = (
+        api_model_name not in NO_TEMPERATURE_MODELS
+        and provider not in ("anthropic", "bedrock")
+        and not (
+            provider in ("openai", "azure_openai") and is_reasoning_model(model_name)
+        )
     )
     if (
         include_temperature

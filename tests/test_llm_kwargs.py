@@ -173,3 +173,24 @@ def test_claude_opus_4_8_bedrock_kwargs_omit_deprecated_temperature():
         "model_name": "us.anthropic.claude-opus-4-8",
         "max_tokens": 64000,
     }
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["claude-opus-4-6", "us.anthropic.claude-sonnet-4-6-v1:0"],
+)
+def test_anthropic_and_bedrock_never_include_temperature(model_name: str):
+    """The installed anthropic SDK has no `temperature` parameter on
+    Messages.create at all (removed for every model, not just specific
+    ones) -- so, unlike other providers, no anthropic/bedrock model should
+    ever get a `temperature` kwarg, even one flagged `think_temp_fixed`
+    (which would otherwise force `temperature=1.0`) and even with thinking
+    disabled (where temperature would normally be free to vary)."""
+    for reasoning_effort in ("disabled", "low", "high"):
+        kwargs = sample_model_kwargs(
+            model_names=[model_name],
+            temperatures=[0.0, 0.5, 1.0],
+            max_tokens=[8192],
+            reasoning_efforts=[reasoning_effort],
+        )
+        assert "temperature" not in kwargs
