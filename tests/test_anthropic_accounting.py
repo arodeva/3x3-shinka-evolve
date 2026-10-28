@@ -3,6 +3,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import anthropic
+import httpx as httpx2  # anthropic's SDK types its signatures against this alias
 import pytest
 
 import shinka.llm.providers.anthropic as anthropic_provider
@@ -11,6 +13,41 @@ from shinka.llm.providers.anthropic import (
     query_anthropic,
     query_anthropic_async,
 )
+
+
+def _adaptive_thinking_rejection() -> anthropic.BadRequestError:
+    """The 400 a newer Claude model (e.g. one requiring adaptive thinking)
+    returns when sent an explicit thinking budget -- see
+    _wants_adaptive_thinking / _adapt_thinking_kwargs in the provider."""
+    response = httpx2.Response(
+        400, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    message = (
+        'Error code: 400 - {\'error\': {\'message\': \'"thinking.type.enabled" '
+        'is not supported for this model. Use "thinking.type.adaptive" and '
+        '"output_config.effort" to control thinking behavior.\'}}'
+    )
+    return anthropic.BadRequestError(message, response=response, body=None)
+
+
+class _FlakyAdaptiveClient:
+    """Rejects an explicit thinking budget once, then succeeds -- records the
+    kwargs passed to each attempt so the retry's correction can be checked."""
+
+    def __init__(self, response, *, asynchronous: bool = False):
+        self.calls: list[dict] = []
+
+        def record_and_respond(**kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise _adaptive_thinking_rejection()
+            return response
+
+        async def create_async(**kwargs):
+            return record_and_respond(**kwargs)
+
+        create = create_async if asynchronous else record_and_respond
+        self.messages = SimpleNamespace(create=create)
 
 
 def _response(
@@ -202,3 +239,79 @@ def test_async_content_blocks_are_split_by_type(
 
     assert result.content == expected_content
     assert result.thought == expected_thought
+
+
+def test_adaptive_thinking_rejection_retries_with_corrected_kwargs():
+    client = _FlakyAdaptiveClient(_response())
+    result = query_anthropic(
+        client,
+        "anthropic/not-in-catalog",
+        "msg",
+        "sys",
+        [],
+        None,
+        thinking={"type": "enabled", "budget_tokens": 4096},
+        max_tokens=32768,
+    )
+
+    assert result.content == "ok"
+    assert len(client.calls) == 2
+    assert client.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert client.calls[1]["thinking"] == {"type": "adaptive"}
+    # Unrelated kwargs must survive the retry unchanged.
+    assert client.calls[1]["max_tokens"] == 32768
+
+
+def test_async_adaptive_thinking_rejection_retries_with_corrected_kwargs():
+    client = _FlakyAdaptiveClient(_response(), asynchronous=True)
+    result = asyncio.run(
+        query_anthropic_async(
+            client,
+            "anthropic/not-in-catalog",
+            "msg",
+            "sys",
+            [],
+            None,
+            thinking={"type": "enabled", "budget_tokens": 8192},
+            max_tokens=16384,
+        )
+    )
+
+    assert result.content == "ok"
+    assert len(client.calls) == 2
+    assert client.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert client.calls[1]["thinking"] == {"type": "adaptive"}
+    assert client.calls[1]["max_tokens"] == 16384
+
+
+def test_unrelated_bad_request_error_is_not_swallowed(monkeypatch):
+    """A 400 for a different reason must propagate, not be mistaken for the
+    adaptive-thinking case and silently retried with altered kwargs.
+
+    BadRequestError is an APIStatusError, which the module's @backoff.on_exception
+    retries up to MAX_TRIES times -- pointlessly, since a 400 is deterministic,
+    but that's existing, unrelated behavior this test isn't about. Patch
+    time.sleep so backoff's real exponential waits don't make this test slow.
+    """
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    response = httpx2.Response(
+        400, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    other_error = anthropic.BadRequestError(
+        "Error code: 400 - some unrelated validation error", response=response, body=None
+    )
+
+    def always_fails(**_kwargs):
+        raise other_error
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=always_fails))
+    with pytest.raises(anthropic.BadRequestError):
+        query_anthropic(
+            client,
+            "anthropic/not-in-catalog",
+            "msg",
+            "sys",
+            [],
+            None,
+            thinking={"type": "enabled", "budget_tokens": 4096},
+        )

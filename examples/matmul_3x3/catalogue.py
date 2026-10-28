@@ -82,12 +82,28 @@ def iter_catalogue(root: str) -> Iterator[Tuple[str, np.ndarray, np.ndarray, np.
 
 
 def check_scheme(U, V, W, root: str) -> dict:
-    """Compare a scheme against the catalogue by canonical signature."""
-    target = symmetry.canonical_signature(U, V, W)
+    """Compare a scheme against the catalogue by canonical signature.
+
+    canonical_signature is exact but expensive (it searches the full verified
+    symmetry group, currently 1296 elements). rank_profile is cheap and only
+    ever under-filters (equal profile is necessary, not sufficient, for an
+    equal signature; see symmetry.rank_profile), so it's used first to avoid
+    the expensive comparison on the ~87% of entries that can't possibly match.
+    """
+    target_profile = symmetry.rank_profile(U, V, W)
+    target_sig = symmetry.canonical_signature(U, V, W)
     matches = []
     total = 0
+    profile_candidates = 0
     for path, cU, cV, cW in iter_catalogue(root):
         total += 1
-        if symmetry.canonical_signature(cU, cV, cW) == target:
+        if symmetry.rank_profile(cU, cV, cW) != target_profile:
+            continue
+        profile_candidates += 1
+        if symmetry.canonical_signature(cU, cV, cW) == target_sig:
             matches.append(path)
-    return {"catalogue_size": total, "matches": matches}
+    return {
+        "catalogue_size": total,
+        "profile_candidates": profile_candidates,
+        "matches": matches,
+    }

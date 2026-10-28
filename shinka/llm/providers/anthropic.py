@@ -69,6 +69,33 @@ def backoff_handler(details):
         )
 
 
+def _wants_adaptive_thinking(exc: Exception) -> bool:
+    """True if the API rejected an explicit thinking budget because this
+    model only supports adaptive thinking (newer Claude generations moved
+    effort control to output_config.effort and no longer accept
+    thinking.type == "enabled" with a budget_tokens value). This is a
+    deterministic 400 -- the generic backoff retry above will retry it up to
+    MAX_TRIES times with the identical, still-invalid kwargs before giving
+    up, which never succeeds and only wastes time. Detecting it and fixing
+    the kwargs is the only way to actually recover."""
+    msg = str(exc)
+    return '"thinking.type.enabled" is not supported' in msg and "adaptive" in msg
+
+
+def _adapt_thinking_kwargs(kwargs: dict) -> dict:
+    """Switch an explicit {"type": "enabled", "budget_tokens": ...} thinking
+    config to {"type": "adaptive"}, which is what newer Claude models require
+    instead. This drops explicit effort/budget control for this call rather
+    than guessing a translation to output_config.effort -- the API error that
+    triggers this only tells us the old shape is rejected, not the exact
+    mapping from a token budget to an effort level, so this is a deliberately
+    conservative fallback: the call succeeds, but loses effort differentiation."""
+    new_kwargs = dict(kwargs)
+    if "thinking" in new_kwargs:
+        new_kwargs["thinking"] = {"type": "adaptive"}
+    return new_kwargs
+
+
 @backoff.on_exception(
     backoff.expo,
     (
@@ -105,12 +132,26 @@ def query_anthropic(
         }
     ]
     if output_model is None:
-        response = client.messages.create(
-            model=model,
-            system=system_msg,
-            messages=new_msg_history,
-            **kwargs,
-        )
+        try:
+            response = client.messages.create(
+                model=model,
+                system=system_msg,
+                messages=new_msg_history,
+                **kwargs,
+            )
+        except anthropic.BadRequestError as exc:
+            if not _wants_adaptive_thinking(exc):
+                raise
+            logger.info(
+                f"Anthropic - {model} rejected explicit thinking budget; "
+                "retrying once with thinking.type=adaptive."
+            )
+            response = client.messages.create(
+                model=model,
+                system=system_msg,
+                messages=new_msg_history,
+                **_adapt_thinking_kwargs(kwargs),
+            )
         content, thought = split_content_blocks(response)
     else:
         raise NotImplementedError("Structured output not supported for Anthropic.")
@@ -177,12 +218,26 @@ async def query_anthropic_async(
         }
     ]
     if output_model is None:
-        response = await client.messages.create(
-            model=model,
-            system=system_msg,
-            messages=new_msg_history,
-            **kwargs,
-        )
+        try:
+            response = await client.messages.create(
+                model=model,
+                system=system_msg,
+                messages=new_msg_history,
+                **kwargs,
+            )
+        except anthropic.BadRequestError as exc:
+            if not _wants_adaptive_thinking(exc):
+                raise
+            logger.info(
+                f"Anthropic - {model} rejected explicit thinking budget; "
+                "retrying once with thinking.type=adaptive."
+            )
+            response = await client.messages.create(
+                model=model,
+                system=system_msg,
+                messages=new_msg_history,
+                **_adapt_thinking_kwargs(kwargs),
+            )
         content, thought = split_content_blocks(response)
     else:
         raise NotImplementedError("Structured output not supported for Anthropic.")
